@@ -1,0 +1,6 @@
+.DS_Store
+__pycache__/
+reporter.json
+site.json
+*.sqlite3*
+*.log

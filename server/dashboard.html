@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Device Stats</title>
+<style>
+:root { color-scheme: dark; --bg: #10171b; --card: #172227; --line: #334349; --ink: #eef5f2; --muted: #adc0c0; --accent: #62dfbd; --stale: #ffcb83; }
+* { box-sizing: border-box; }
+body { margin: 0; color: var(--ink); background: var(--bg); font: 15px/1.45 system-ui, sans-serif; }
+main { max-width: 900px; margin: 0 auto; padding: clamp(18px, 5vw, 48px) clamp(14px, 4vw, 28px); }
+h1, h2, p { margin: 0; }
+h1 { font-size: clamp(30px, 5vw, 44px); letter-spacing: -.055em; }
+h2 { font-size: 19px; letter-spacing: -.025em; }
+header, .history-head, .controls, .axes { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+header { margin-bottom: 20px; }
+#count, .freshness, .metric-label, .detail, .axes { color: var(--muted); font-size: 13px; }
+.freshness[data-state="live"] { color: var(--accent); }
+.freshness[data-state="stale"], #error { color: var(--stale); }
+#error { margin-bottom: 12px; }
+#devices { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+button { font: inherit; color: inherit; cursor: pointer; }
+.device, #history { text-align: left; background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; }
+.device[aria-pressed="true"] { border-color: var(--accent); }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.device-name { display: block; font-weight: 690; font-size: 19px; }
+.metrics { display: grid; grid-template-columns: 1fr .65fr 1.3fr; gap: 8px; margin-top: 18px; }
+.metrics span { display: block; }
+.value { margin-top: 4px; font-size: 15px; font-variant-numeric: tabular-nums; font-weight: 650; }
+#history { margin-top: 12px; }
+.controls { justify-content: start; flex-wrap: wrap; margin: 14px 0; }
+.group { display: flex; gap: 4px; border: 1px solid var(--line); border-radius: 9px; padding: 3px; }
+.group button { background: transparent; border: 0; border-radius: 5px; min-height: 34px; padding: 0 10px; font-size: 13px; }
+.group button[aria-pressed="true"] { background: var(--accent); color: #10211e; }
+.plot { display: grid; grid-template-columns: 36px 1fr; gap: 6px; }
+.ticks { flex-direction: column; align-items: end; padding: 0 3px; }
+.times { grid-column: 2; }
+canvas { width: 100%; height: 155px; display: block; }
+[hidden] { display: none !important; }
+@media (max-width: 550px) { #devices { grid-template-columns: 1fr; } .metrics { margin-top: 12px; } }
+</style>
+</head>
+<body>
+<main>
+  <header><h1>Device Stats</h1><p id="count" role="status">Loading devices…</p></header>
+  <p id="error" role="status" hidden></p>
+  <section id="devices" aria-label="Devices"></section>
+  <section id="history" aria-labelledby="history-title" hidden>
+    <div class="history-head"><h2 id="history-title"></h2></div>
+    <div class="controls">
+      <div class="group" role="group" aria-label="Metric">
+        <button type="button" data-metric="cpu" aria-pressed="true">CPU</button>
+        <button type="button" data-metric="ram" aria-pressed="false">RAM</button>
+        <button type="button" data-metric="battery" aria-pressed="false">Battery</button>
+      </div>
+      <div class="group" role="group" aria-label="History range">
+        <button type="button" data-hours="1" aria-pressed="true">1h</button>
+        <button type="button" data-hours="24" aria-pressed="false">24h</button>
+        <button type="button" data-hours="168" aria-pressed="false">7d</button>
+      </div>
+    </div>
+    <p class="detail" id="empty-history" hidden>No readings in this range.</p>
+    <div class="plot" id="plot" hidden>
+      <div class="axes ticks" aria-hidden="true"><span>100%</span><span>50%</span><span>0%</span></div>
+      <canvas id="chart" role="img"></canvas>
+      <div class="axes times" aria-hidden="true"><span id="range-start"></span><span>Now</span></div>
+    </div>
+  </section>
+  <template id="device-template">
+    <button class="device" type="button" aria-pressed="false">
+      <span class="device-name"></span><span class="freshness"></span>
+      <span class="metrics">
+        <span><span class="metric-label">Battery</span><span class="value battery"></span><span class="detail power"></span></span>
+        <span><span class="metric-label">CPU</span><span class="value cpu"></span></span>
+        <span><span class="metric-label">RAM</span><span class="value ram"></span></span>
+      </span>
+    </button>
+  </template>
+</main>
+<script>
+const cards = new Map();
+const byId = id => document.getElementById(id);
+const canvas = byId('chart');
+const rangeLabels = {1: '1h ago', 24: '24h ago', 168: '7d ago'};
+const metricLabels = {cpu: 'CPU usage', ram: 'RAM usage', battery: 'Battery charge'};
+let selected, snapshot, pending;
+let metric = 'cpu';
+let hours = 1;
+
+function ageText(seconds) {
+  if (seconds < 15) return 'just now';
+  if (seconds < 60) return seconds + 's ago';
+  if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
+  if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ago';
+  return Math.floor(seconds / 86400) + 'd ago';
+}
+
+function updateCards() {
+  const staleDashboard = !byId('error').hidden;
+  const now = snapshot.now + Math.floor((performance.now() - snapshot.loadedAt) / 1000);
+  let liveCount = 0;
+  for (const {id, name, latest} of snapshot.devices) {
+    if (!cards.has(id)) {
+      const card = byId('device-template').content.firstElementChild.cloneNode(true);
+      card.addEventListener('click', () => { selected = id; updateCards(); draw(); });
+      byId('devices').append(card);
+      cards.set(id, card);
+    }
+    const card = cards.get(id);
+    const set = (className, text) => { card.querySelector('.' + className).textContent = text; };
+    const age = latest ? now - latest.recorded : Infinity;
+    const live = !staleDashboard && age <= 90;
+    liveCount += Number(live);
+    card.setAttribute('aria-pressed', id === selected);
+    set('device-name', name);
+    card.querySelector('.freshness').dataset.state = live ? 'live' : 'stale';
+    set('freshness', latest ? (live ? 'Updated ' : 'Last seen ') + ageText(age) : 'Awaiting first sample');
+    set('battery', live ? (latest.battery === null ? 'N/A' : latest.battery + '%') : '—');
+    set('power', live ? latest.power || '' : '');
+    set('cpu', live ? latest.cpu + '%' : '—');
+    const gib = bytes => +(bytes / (1024 ** 3)).toFixed(1);
+    set('ram', live ? gib(latest.ram_used) + ' / ' + gib(latest.ram_total) + ' GB' : '—');
+  }
+  byId('count').textContent = staleDashboard ? 'Connection lost' : liveCount + ' of ' + snapshot.devices.length + ' reporting';
+}
+
+function draw() {
+  const device = snapshot?.devices.find(device => device.id === selected);
+  if (!device) return;
+  byId('history').hidden = false;
+  byId('history-title').textContent = device.name + ' history';
+  byId('range-start').textContent = rangeLabels[snapshot.hours];
+  const points = device.history.filter(point => point[metric] !== null);
+  byId('empty-history').hidden = points.length > 0;
+  byId('plot').hidden = points.length === 0;
+  if (!points.length) return;
+
+  const values = points.map(point => point[metric]);
+  canvas.setAttribute('aria-label', metricLabels[metric] + ' from ' + rangeLabels[snapshot.hours] +
+    ' to now. Minimum ' + Math.min(...values) + '%, maximum ' + Math.max(...values) + '%.');
+  const {width, height} = canvas.getBoundingClientRect();
+  const scale = window.devicePixelRatio || 1;
+  canvas.width = Math.round(width * scale);
+  canvas.height = Math.round(height * scale);
+  const ctx = canvas.getContext('2d');
+  ctx.scale(scale, scale);
+  const theme = getComputedStyle(canvas);
+  ctx.strokeStyle = theme.getPropertyValue('--line').trim();
+  const y = value => 3 + (height - 6) * (1 - value / 100);
+  for (const level of [0, 50, 100]) {
+    ctx.beginPath();
+    ctx.moveTo(0, y(level));
+    ctx.lineTo(width, y(level));
+    ctx.stroke();
+  }
+  ctx.strokeStyle = ctx.fillStyle = theme.getPropertyValue('--accent').trim();
+  ctx.lineWidth = 1.5;
+  let previous;
+  for (const point of points) {
+    const midpoint = point.time + snapshot.bucket / 2;
+    const fraction = (midpoint - snapshot.since) / (snapshot.now - snapshot.since);
+    const x = 3 + Math.max(0, Math.min(1, fraction)) * (width - 6);
+    const value = y(point[metric]);
+    ctx.beginPath();
+    if (previous && point.time - previous.time <= snapshot.bucket) {
+      ctx.moveTo(previous.x, previous.value);
+      ctx.lineTo(x, value);
+      ctx.stroke();
+    } else {
+      ctx.arc(x, value, 2, 0, 2 * Math.PI);
+      ctx.fill();
+    }
+    previous = {x, value, time: point.time};
+  }
+}
+
+async function refresh() {
+  pending?.abort();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 7000);
+  pending = controller;
+  const requestedHours = hours;
+  try {
+    const response = await fetch('/api/devices?hours=' + requestedHours, {signal: controller.signal});
+    if (!response.ok) throw new Error('Dashboard request failed');
+    const data = await response.json();
+    if (pending !== controller) return;
+    snapshot = {...data, hours: requestedHours, loadedAt: performance.now()};
+    selected ??= snapshot.devices[0]?.id;
+    byId('error').hidden = true;
+    updateCards();
+    draw();
+  } catch {
+    if (pending !== controller) return;
+    byId('error').textContent = 'Couldn’t reach the collector. Check the Air and your Tailscale connection.';
+    byId('error').hidden = false;
+    if (snapshot) updateCards();
+    else byId('count').textContent = 'Connection lost';
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+for (const button of document.querySelectorAll('.group button')) {
+  button.addEventListener('click', () => {
+    for (const peer of button.parentElement.children) peer.setAttribute('aria-pressed', peer === button);
+    if (button.dataset.metric) {
+      metric = button.dataset.metric;
+      draw();
+    } else {
+      hours = Number(button.dataset.hours);
+      refresh();
+    }
+  });
+}
+new ResizeObserver(draw).observe(byId('history'));
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+setInterval(() => { if (!document.hidden) refresh(); }, 15000);
+refresh();
+</script>
+</body>
+</html>
