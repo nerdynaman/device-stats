@@ -36,6 +36,16 @@ python3 install.py register macbook-pro "MacBook Pro" PRO_FINGERPRINT
 
 Open the Serve URL on any permitted tailnet device.
 
+### Apply changes and restart
+
+On the Air for website changes, or on each reporting Mac for reporter changes:
+
+```sh
+git pull --ff-only && python3 install.py restart
+```
+
+Skip the pull if the changes are already in your checkout. The command restarts the services installed on that Mac, starting the site before the reporter when both are installed. Refresh the website to see HTML changes.
+
 ### Recover a fingerprint
 
 If you missed the installer output, run this on the reporting Mac:

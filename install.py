@@ -1,4 +1,4 @@
-"""Install persistent per-user macOS launch agents for Device Stats."""
+"""Install and restart per-user macOS launch agents for Device Stats."""
 import argparse
 import hashlib
 import json
@@ -7,9 +7,12 @@ import plistlib
 import re
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from urllib.parse import urlsplit
 
 SOURCE = Path(__file__).resolve().parent
@@ -28,6 +31,16 @@ def write_json(path, data):
     temporary.replace(path)
 
 
+def copy_source(source):
+    with NamedTemporaryFile(dir=APP, delete=False) as temporary:
+        path = Path(temporary.name)
+    try:
+        shutil.copyfile(source, path)
+        path.replace(APP / source.name)
+    finally:
+        path.unlink(missing_ok=True)
+
+
 def install_agent(name, script, config, interval=None):
     label = f"local.device-stats.{name}"
     path = AGENTS / (label + ".plist")
@@ -44,10 +57,7 @@ def install_agent(name, script, config, interval=None):
     else:
         settings["KeepAlive"] = True
 
-    target = APP / script.name
-    temporary = target.with_suffix(".tmp")
-    shutil.copyfile(script, temporary)
-    temporary.replace(target)
+    copy_source(script)
 
     running = subprocess.run([LAUNCHCTL, "print", service], capture_output=True).returncode == 0
     if running:
@@ -73,10 +83,7 @@ def configure_reporter(device, url):
 
 def install_server():
     source = SOURCE / "server"
-    dashboard = APP / "dashboard.html"
-    temporary = dashboard.with_suffix(".tmp")
-    shutil.copyfile(source / "dashboard.html", temporary)
-    temporary.replace(dashboard)
+    copy_source(source / "dashboard.html")
     config = APP / "site.json"
     if not config.exists():
         write_json(config, {"port": PORT, "devices": {}})
@@ -96,10 +103,44 @@ def register_device(device, name, fingerprint):
     subprocess.run([LAUNCHCTL, "kickstart", "-k", f"{DOMAIN}/{SITE_LABEL}"], check=True)
 
 
+def wait_for_site(port):
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+                return
+        except OSError:
+            if time.monotonic() >= deadline:
+                sys.exit(f"Site did not start on port {port}. Check {APP / 'site.log'}.")
+            time.sleep(0.1)
+
+
+def restart_agents():
+    sources = {
+        SITE_LABEL: (SOURCE / "server/server.py", SOURCE / "server/dashboard.html"),
+        "local.device-stats.reporter": (SOURCE / "client/reporter.py",),
+    }
+    installed = [label for label in sources if (AGENTS / (label + ".plist")).is_file()]
+    if not installed:
+        sys.exit("No Device Stats launch agents are installed on this Mac.")
+
+    for label in installed:
+        subprocess.run([LAUNCHCTL, "print", f"{DOMAIN}/{label}"], stdout=subprocess.DEVNULL, check=True)
+    port = json.loads((APP / "site.json").read_text())["port"] if SITE_LABEL in installed else None
+    for label in installed:
+        for source in sources[label]:
+            copy_source(source)
+        subprocess.run([LAUNCHCTL, "kickstart", "-k", f"{DOMAIN}/{label}"], check=True)
+        if label == SITE_LABEL:
+            wait_for_site(port)
+        print(f"Restarted {label}.")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="role", required=True)
     commands.add_parser("server", help="Install the dashboard and collector")
+    commands.add_parser("restart", help="Update and restart the services installed on this Mac")
     client = commands.add_parser("client", help="Install a Mac metrics reporter")
     client.add_argument("device")
     client.add_argument("url", help="Tailscale Serve HTTPS origin or local collector")
@@ -109,7 +150,7 @@ def main():
     register.add_argument("sha256")
     args = parser.parse_args()
 
-    if args.role != "server" and not DEVICE_ID.fullmatch(args.device):
+    if args.role in ("client", "register") and not DEVICE_ID.fullmatch(args.device):
         parser.error("Use a lowercase device ID with letters, numbers, or hyphens.")
     if args.role == "client":
         try:
@@ -126,6 +167,10 @@ def main():
         parser.error("Provide a display name and the client's 64-character SHA-256 fingerprint.")
 
     os.umask(0o077)
+    if args.role == "restart":
+        restart_agents()
+        return
+
     APP.mkdir(parents=True, exist_ok=True)
     AGENTS.mkdir(parents=True, exist_ok=True)
 

@@ -7,7 +7,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import install
 from client import reporter
@@ -17,6 +17,42 @@ SAMPLE = {"cpu": 27.2, "ram_used": 7, "ram_total": 16, "battery": 63, "power": "
 
 
 class DeviceStatsTest(unittest.TestCase):
+    def test_restart_updates_only_installed_services(self):
+        reporter_label = "local.device-stats.reporter"
+        for labels in ((reporter_label,), (install.SITE_LABEL, reporter_label)):
+            with self.subTest(labels=labels), tempfile.TemporaryDirectory() as folder:
+                app = Path(folder) / "application"
+                agents = Path(folder) / "agents"
+                app.mkdir()
+                agents.mkdir()
+                for label in labels:
+                    (agents / (label + ".plist")).write_text("existing launch agent")
+                (app / "reporter.json").write_text("existing reporter configuration")
+                (app / "samples.sqlite3").write_bytes(b"existing samples")
+                if install.SITE_LABEL in labels:
+                    (app / "site.json").write_text('{"port": 8787, "devices": {}}')
+                with patch.object(install, "APP", app), patch.object(install, "AGENTS", agents), \
+                        patch.object(install.subprocess, "run") as launchctl, \
+                        patch.object(install, "wait_for_site") as wait_for_site:
+                    install.restart_agents()
+
+                expected = [
+                    call([install.LAUNCHCTL, "kickstart", "-k", f"{install.DOMAIN}/{label}"], check=True)
+                    for label in labels
+                ]
+                self.assertEqual(launchctl.call_args_list[-len(labels):], expected)
+                self.assertEqual((app / "reporter.py").read_bytes(),
+                                 (install.SOURCE / "client/reporter.py").read_bytes())
+                self.assertEqual((app / "reporter.json").read_text(), "existing reporter configuration")
+                self.assertEqual((app / "samples.sqlite3").read_bytes(), b"existing samples")
+                if install.SITE_LABEL in labels:
+                    wait_for_site.assert_called_once_with(8787)
+                    self.assertEqual((app / "dashboard.html").read_bytes(),
+                                     (install.SOURCE / "server/dashboard.html").read_bytes())
+                else:
+                    wait_for_site.assert_not_called()
+                    self.assertFalse((app / "dashboard.html").exists())
+
     def test_register_client_preserves_other_devices(self):
         with tempfile.TemporaryDirectory() as folder, patch.object(install, "APP", Path(folder)):
             fingerprint = "a" * 64
