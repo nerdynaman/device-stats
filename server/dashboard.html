@@ -34,10 +34,16 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .group { display: flex; gap: 4px; border: 1px solid var(--line); border-radius: 9px; padding: 3px; }
 .group button { background: transparent; border: 0; border-radius: 5px; min-height: 34px; padding: 0 10px; font-size: 13px; }
 .group button[aria-pressed="true"] { background: var(--accent); color: #10211e; }
-.plot { display: grid; grid-template-columns: 36px 1fr; gap: 6px; }
+.plot { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 6px; }
 .ticks { flex-direction: column; align-items: end; padding: 0 3px; }
 .times { grid-column: 2; }
-canvas { width: 100%; height: 155px; display: block; }
+.chart-frame { position: relative; }
+canvas { width: 100%; height: 155px; display: block; cursor: crosshair; touch-action: pan-y; }
+canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.chart-guide, .chart-dot, .chart-reading { position: absolute; pointer-events: none; }
+.chart-guide { inset-block: 0; width: 1px; background: var(--muted); }
+.chart-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); transform: translate(-50%, -50%); }
+.chart-reading { top: 5px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); white-space: nowrap; font-size: 12px; }
 [hidden] { display: none !important; }
 @media (max-width: 550px) { #devices { grid-template-columns: 1fr; } .metrics { margin-top: 12px; } }
 </style>
@@ -64,7 +70,12 @@ canvas { width: 100%; height: 155px; display: block; }
     <p class="detail" id="empty-history" hidden>No readings in this range.</p>
     <div class="plot" id="plot" hidden>
       <div class="axes ticks" aria-hidden="true"><span>100%</span><span>50%</span><span>0%</span></div>
-      <canvas id="chart" role="img"></canvas>
+      <div class="chart-frame">
+        <canvas id="chart" role="img" tabindex="0"></canvas>
+        <div id="chart-guide" class="chart-guide" hidden></div>
+        <div id="chart-dot" class="chart-dot" hidden></div>
+        <div id="chart-reading" class="chart-reading" hidden></div>
+      </div>
       <div class="axes times" aria-hidden="true"><span id="range-start"></span><span>Now</span></div>
     </div>
   </section>
@@ -83,9 +94,14 @@ canvas { width: 100%; height: 155px; display: block; }
 const cards = new Map();
 const byId = id => document.getElementById(id);
 const canvas = byId('chart');
+const guide = byId('chart-guide');
+const dot = byId('chart-dot');
+const reading = byId('chart-reading');
 const rangeLabels = {1: '1h ago', 24: '24h ago', 168: '7d ago'};
 const metricLabels = {cpu: 'CPU usage', ram: 'RAM usage', battery: 'Battery charge'};
 let selected, snapshot, pending;
+let plotted = [];
+let cursorX = null;
 let metric = 'cpu';
 let hours = 1;
 
@@ -104,7 +120,7 @@ function updateCards() {
   for (const {id, name, latest} of snapshot.devices) {
     if (!cards.has(id)) {
       const card = byId('device-template').content.firstElementChild.cloneNode(true);
-      card.addEventListener('click', () => { selected = id; updateCards(); draw(); });
+      card.addEventListener('click', () => { selected = id; inspect(null); updateCards(); draw(); });
       byId('devices').append(card);
       cards.set(id, card);
     }
@@ -133,6 +149,32 @@ function updateCards() {
   byId('count').textContent = staleDashboard ? 'Connection lost' : liveCount + ' of ' + snapshot.devices.length + ' reporting';
 }
 
+function inspect(x) {
+  const {width} = canvas.getBoundingClientRect();
+  cursorX = x === null ? null : Math.max(0, Math.min(width, x));
+  guide.hidden = cursorX === null || !plotted.length;
+  dot.hidden = reading.hidden = true;
+  if (guide.hidden) return;
+  guide.style.left = cursorX + 'px';
+
+  const nearest = plotted.reduce((best, point) =>
+    Math.abs(point.x - cursorX) < Math.abs(best.x - cursorX) ? point : best);
+  const tolerance = Math.max(6, (width - 6) * snapshot.bucket / (snapshot.now - snapshot.since) / 2);
+  if (Math.abs(nearest.x - cursorX) > tolerance) return;
+  dot.style.left = nearest.x + 'px';
+  dot.style.top = nearest.y + 'px';
+  dot.hidden = false;
+  const time = new Date(nearest.time * 1000).toLocaleString([], {
+    month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+    ...(snapshot.bucket === 30 ? {second: '2-digit'} : {}),
+  });
+  reading.textContent = time + ' · ' + nearest.reading + '%';
+  reading.hidden = false;
+  const tooltipWidth = reading.offsetWidth;
+  const left = cursorX + 8 + tooltipWidth <= width ? cursorX + 8 : cursorX - tooltipWidth - 8;
+  reading.style.left = Math.max(0, left) + 'px';
+}
+
 function draw() {
   const device = snapshot?.devices.find(device => device.id === selected);
   if (!device) return;
@@ -142,11 +184,16 @@ function draw() {
   const points = device.history.filter(point => point[metric] !== null);
   byId('empty-history').hidden = points.length > 0;
   byId('plot').hidden = points.length === 0;
-  if (!points.length) return;
+  if (!points.length) {
+    plotted = [];
+    inspect(null);
+    return;
+  }
 
   const values = points.map(point => point[metric]);
   canvas.setAttribute('aria-label', metricLabels[metric] + ' from ' + rangeLabels[snapshot.hours] +
-    ' to now. Minimum ' + Math.min(...values) + '%, maximum ' + Math.max(...values) + '%.');
+    ' to now. Minimum ' + Math.min(...values) + '%, maximum ' + Math.max(...values) +
+    '%. Use the arrow keys to inspect points.');
   const {width, height} = canvas.getBoundingClientRect();
   const scale = window.devicePixelRatio || 1;
   canvas.width = Math.round(width * scale);
@@ -164,23 +211,26 @@ function draw() {
   }
   ctx.strokeStyle = ctx.fillStyle = theme.getPropertyValue('--accent').trim();
   ctx.lineWidth = 1.5;
-  let previous;
-  for (const point of points) {
+  plotted = points.map(point => {
     const midpoint = point.time + snapshot.bucket / 2;
     const fraction = (midpoint - snapshot.since) / (snapshot.now - snapshot.since);
     const x = 3 + Math.max(0, Math.min(1, fraction)) * (width - 6);
-    const value = y(point[metric]);
+    return {x, y: y(point[metric]), reading: point[metric], time: point.time};
+  });
+  let previous;
+  for (const point of plotted) {
     ctx.beginPath();
     if (previous && point.time - previous.time <= snapshot.bucket) {
-      ctx.moveTo(previous.x, previous.value);
-      ctx.lineTo(x, value);
+      ctx.moveTo(previous.x, previous.y);
+      ctx.lineTo(point.x, point.y);
       ctx.stroke();
     } else {
-      ctx.arc(x, value, 2, 0, 2 * Math.PI);
+      ctx.arc(point.x, point.y, 2, 0, 2 * Math.PI);
       ctx.fill();
     }
-    previous = {x, value, time: point.time};
+    previous = point;
   }
+  inspect(cursorX);
 }
 
 async function refresh() {
@@ -212,6 +262,7 @@ async function refresh() {
 
 for (const button of document.querySelectorAll('.group button')) {
   button.addEventListener('click', () => {
+    inspect(null);
     for (const peer of button.parentElement.children) peer.setAttribute('aria-pressed', peer === button);
     if (button.dataset.metric) {
       metric = button.dataset.metric;
@@ -222,6 +273,25 @@ for (const button of document.querySelectorAll('.group button')) {
     }
   });
 }
+for (const eventName of ['pointermove', 'pointerdown']) {
+  canvas.addEventListener(eventName, event => inspect(event.clientX - canvas.getBoundingClientRect().left));
+}
+canvas.addEventListener('pointerleave', event => { if (event.pointerType !== 'touch') inspect(null); });
+canvas.addEventListener('pointercancel', () => inspect(null));
+canvas.addEventListener('blur', () => inspect(null));
+canvas.addEventListener('keydown', event => {
+  if (!plotted.length || !['ArrowLeft', 'ArrowRight', 'Escape'].includes(event.key)) return;
+  event.preventDefault();
+  if (event.key === 'Escape') {
+    inspect(null);
+    return;
+  }
+  const point = event.key === 'ArrowLeft'
+    ? plotted.findLast(item => cursorX !== null && item.x < cursorX) ?? plotted[0]
+    : plotted.find(item => cursorX === null || item.x > cursorX) ?? plotted[plotted.length - 1];
+  inspect(point.x);
+  canvas.setAttribute('aria-label', metricLabels[metric] + ' ' + reading.textContent);
+});
 new ResizeObserver(draw).observe(byId('history'));
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 setInterval(() => { if (!document.hidden) refresh(); }, 15000);
