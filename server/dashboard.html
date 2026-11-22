@@ -27,6 +27,8 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .metrics { display: grid; grid-template-columns: 1fr .65fr 1.3fr; gap: 8px; margin-top: 18px; }
 .metrics span { display: block; }
 .value { margin-top: 4px; font-size: 15px; font-variant-numeric: tabular-nums; font-weight: 650; }
+.battery[data-level="low"] { color: #ffdb70; }
+.battery[data-level="critical"] { color: #ff8888; }
 #history { margin-top: 12px; }
 .controls { justify-content: start; flex-wrap: wrap; margin: 14px 0; }
 .group { display: flex; gap: 4px; border: 1px solid var(--line); border-radius: 9px; padding: 3px; }
@@ -115,7 +117,14 @@ function updateCards() {
     set('device-name', name);
     card.querySelector('.freshness').dataset.state = live ? 'live' : 'stale';
     set('freshness', latest ? (live ? 'Updated ' : 'Last seen ') + ageText(age) : 'Awaiting first sample');
-    set('battery', live ? (latest.battery === null ? 'N/A' : latest.battery + '%') : '—');
+    const battery = live ? latest.battery : null;
+    set('battery', battery !== null ? battery + '%' : (live ? 'N/A' : '—'));
+    const batteryValue = card.querySelector('.battery');
+    if (battery === null || battery > 50) {
+      delete batteryValue.dataset.level;
+    } else {
+      batteryValue.dataset.level = battery < 20 ? 'critical' : 'low';
+    }
     set('power', live ? latest.power || '' : '');
     set('cpu', live ? latest.cpu + '%' : '—');
     const gib = bytes => +(bytes / (1024 ** 3)).toFixed(1);

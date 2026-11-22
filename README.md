@@ -35,3 +35,17 @@ python3 install.py register macbook-pro "MacBook Pro" PRO_FINGERPRINT
 ```
 
 Open the Serve URL on any permitted tailnet device.
+
+### Recover a fingerprint
+
+If you missed the installer output, run this on the reporting Mac:
+
+```sh
+python3 - <<'PY'
+import hashlib, json
+from pathlib import Path
+
+config = Path.home() / "Library/Application Support/Device Stats/reporter.json"
+print(hashlib.sha256(json.loads(config.read_text())["token"].encode()).hexdigest())
+PY
+```
