@@ -1,61 +1,63 @@
-# Device Stats
+<p align="center"><img src="assets/hero.svg" alt="Device Stats — CPU, memory and battery monitoring for Macs on your tailnet" width="100%"></p>
 
-Python 3.9+. Clone this repo on the Air and each reporting Mac, or copy the checkout from the Air. Run commands from the repo root while signed in. All devices should already be on your tailnet.
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&amp;logoColor=white" alt="Python 3.9 or later">
+  <img src="https://img.shields.io/badge/Dependencies-zero-166534" alt="Zero Python dependencies">
+  <img src="https://img.shields.io/badge/Access-Tailscale-334155" alt="Private Tailscale access">
+</p>
 
-### MacBook Air · host the site
+A lightweight dashboard for **CPU, memory, battery and power state across your Macs**. Python reporters send readings every 30 seconds; one collector keeps seven days of SQLite history.
+
+```mermaid
+flowchart LR
+    A[macOS reporters] -->|Authenticated samples| B[Tailscale HTTPS]
+    B --> C[Loopback collector]
+    C --> D[(SQLite)]
+    D --> E[Web dashboard]
+```
+
+## Set up
+
+Requires macOS, Python 3.9+ and devices already connected to your tailnet. Clone this repo on the host and each reporting Mac; run commands from the checkout.
+
+**1 · Start the dashboard on the host Mac**
 
 ```sh
 python3 install.py server
 tailscale serve --bg --https=8443 http://127.0.0.1:8787
 ```
 
-Use the HTTPS URL printed by Serve. If `tailscale` is unavailable, use `/Applications/Tailscale.app/Contents/MacOS/Tailscale`.
+**2 · Install a reporter on each Mac**
 
-### Each reporting Mac · install the client
-
-On the Air:
+Use the HTTPS URL printed by Tailscale Serve and a unique device ID:
 
 ```sh
-python3 install.py client macbook-air http://127.0.0.1:8787
+python3 install.py client my-mac https://HOST.TAILNET.ts.net:8443
 ```
 
-On the Pro or another Mac, replace the URL with the Serve URL and use a unique ID:
+**3 · Register that reporter on the host**
+
+Use the fingerprint printed by the client installer:
 
 ```sh
-python3 install.py client macbook-pro https://AIR.TAILNET.ts.net:8443
+python3 install.py register my-mac "My Mac" CLIENT_FINGERPRINT
 ```
 
-### MacBook Air · register each client
+Open the Serve URL from a permitted tailnet device. Dashboard access is controlled by your tailnet; uploads also require a per-device token.
 
-Use the fingerprint printed by each client installer:
+## At a glance
+
+| Readings | History | Installation |
+| --- | --- | --- |
+| CPU · approximate RAM usage · battery · power state | 1 hour · 24 hours · 7 days, with hover readings | Per-user macOS LaunchAgents |
+
+## Update
 
 ```sh
-python3 install.py register macbook-air "MacBook Air" AIR_FINGERPRINT
-python3 install.py register macbook-pro "MacBook Pro" PRO_FINGERPRINT
+git pull --ff-only
+python3 install.py restart
 ```
 
-Open the Serve URL on any permitted tailnet device.
+The working database, logs and client configuration are ignored by Git. No live device data or tokens are included in this repository.
 
-### Apply changes and restart
-
-On the Air for website changes, or on each reporting Mac for reporter changes:
-
-```sh
-git pull --ff-only && python3 install.py restart
-```
-
-Skip the pull if the changes are already in your checkout. The command restarts the services installed on that Mac, starting the site before the reporter when both are installed. Refresh the website to see HTML changes.
-
-### Recover a fingerprint
-
-If you missed the installer output, run this on the reporting Mac:
-
-```sh
-python3 - <<'PY'
-import hashlib, json
-from pathlib import Path
-
-config = Path.home() / "Library/Application Support/Device Stats/reporter.json"
-print(hashlib.sha256(json.loads(config.read_text())["token"].encode()).hexdigest())
-PY
-```
+[Detailed setup & fingerprint recovery](docs/USAGE.md) · [Collector](server/server.py) · [Reporter](client/reporter.py)
