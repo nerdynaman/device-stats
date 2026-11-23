@@ -17,6 +17,14 @@ SAMPLE = {"cpu": 27.2, "ram_used": 7, "ram_total": 16, "battery": 63, "power": "
 
 
 class DeviceStatsTest(unittest.TestCase):
+    def test_dashboard_api_path_includes_stats_prefix_only_on_stats_route(self):
+        dashboard = (Path(__file__).parent / "server/dashboard.html").read_text()
+        self.assertIn(
+            "location.pathname === '/stats' || location.pathname.startsWith('/stats/') ? '/stats' : ''",
+            dashboard,
+        )
+        self.assertIn("fetch(apiPrefix + '/api/devices?hours='", dashboard)
+
     def test_restart_updates_only_installed_services(self):
         reporter_label = "local.device-stats.reporter"
         for labels in ((reporter_label,), (install.SITE_LABEL, reporter_label)):

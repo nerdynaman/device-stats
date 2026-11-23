@@ -240,7 +240,8 @@ async function refresh() {
   pending = controller;
   const requestedHours = hours;
   try {
-    const response = await fetch('/api/devices?hours=' + requestedHours, {signal: controller.signal});
+    const apiPrefix = location.pathname === '/stats' || location.pathname.startsWith('/stats/') ? '/stats' : '';
+    const response = await fetch(apiPrefix + '/api/devices?hours=' + requestedHours, {signal: controller.signal});
     if (!response.ok) throw new Error('Dashboard request failed');
     const data = await response.json();
     if (pending !== controller) return;
